@@ -2411,23 +2411,31 @@ function _lsIDB(mode){
     req.onerror=rej;
   });
 }
-async function _lsSave(handle){try{var store=await _lsIDB("readwrite");store.put(handle,"excel");}catch(e){}}
+// Locally opened files all share one browser storage origin, so a company export
+// keeps its own Live Sync handles ("excel::<company>", "dashboard::<company>").
+// It can still auto-connect through the master's Excel handle (read-only fallback),
+// but it never writes into — or disconnects — the master dashboard's file.
+function _lsNs(k){return window.ACE_SOLO_COMPANY?k+"::"+window.ACE_SOLO_COMPANY:k;}
+function _lsGet(store,key){return new Promise(function(res){var r=store.get(key);r.onsuccess=function(){res(r.result||null);};r.onerror=function(){res(null);};});}
+async function _lsSave(handle){try{var store=await _lsIDB("readwrite");store.put(handle,_lsNs("excel"));}catch(e){}}
 async function _lsLoad(){
   try{
     var store=await _lsIDB("readonly");
-    return new Promise(function(res){var r=store.get("excel");r.onsuccess=function(){res(r.result||null);};r.onerror=function(){res(null);};});
+    var h=await _lsGet(store,_lsNs("excel"));
+    if(!h&&window.ACE_SOLO_COMPANY){store=await _lsIDB("readonly");h=await _lsGet(store,"excel");}
+    return h;
   }catch(e){return null;}
 }
-async function _lsClear(){try{var store=await _lsIDB("readwrite");store.delete("excel");}catch(e){}}
+async function _lsClear(){try{var store=await _lsIDB("readwrite");store.delete(_lsNs("excel"));}catch(e){}}
 
-async function _lsSaveDash(handle){try{var store=await _lsIDB("readwrite");store.put(handle,"dashboard");}catch(e){}}
+async function _lsSaveDash(handle){try{var store=await _lsIDB("readwrite");store.put(handle,_lsNs("dashboard"));}catch(e){}}
 async function _lsLoadDash(){
   try{
     var store=await _lsIDB("readonly");
-    return new Promise(function(res){var r=store.get("dashboard");r.onsuccess=function(){res(r.result||null);};r.onerror=function(){res(null);};});
+    return await _lsGet(store,_lsNs("dashboard"));
   }catch(e){return null;}
 }
-async function _lsClearDash(){try{var store=await _lsIDB("readwrite");store.delete("dashboard");}catch(e){}}
+async function _lsClearDash(){try{var store=await _lsIDB("readwrite");store.delete(_lsNs("dashboard"));}catch(e){}}
 
 async function _lsWriteBack(){
   var handle=await _lsLoadDash();
@@ -2449,10 +2457,20 @@ async function _lsWriteBack(){
       if(dbLineEnd===-1)dbLineEnd=html.length;
       html=html.slice(0,dbLineStart+1)+'const BASE_DB='+newDB+';'+html.slice(dbLineEnd);
     }
+    if(window.ACE_SOLO_COMPANY){
+      // Locked company file: keep its anonymous network snapshot current too.
+      if(window.ACE_SCALE_PEERS){
+        var sp=JSON.stringify(window.ACE_SCALE_PEERS).replace(/</g,"\\u003c");
+        html=html.replace(/window\.ACE_SCALE_PEERS=[^\n]*;\n/,function(){return "window.ACE_SCALE_PEERS="+sp+";\n";});
+      }
+      var qr=document.getElementById("expQRange");
+      if(qr)html=html.replace(/(<span id="expQRange">)[^<]*(<\/span>)/,function(m,a,b){return a+qr.textContent+b;});
+    }else{
     // Also update submission links, pdf data, and contacts in the file
     html=html.replace(/(<script[^>]*id="sublinks-data"[^>]*>)[^<]*(<\/script>)/,'$1'+JSON.stringify(SUBMISSION_LINKS)+'$2');
     html=html.replace(/(<script[^>]*id="pdfs-data"[^>]*>)[^<]*(<\/script>)/,'$1'+JSON.stringify(SUBMITTED_PDFS)+'$2');
     html=html.replace(/(<script[^>]*id="contacts-data"[^>]*>)[^<]*(<\/script>)/,'$1'+JSON.stringify(CONTACT_EMAILS)+'$2');
+    }
     var writable=await handle.createWritable();
     await writable.write(html);
     await writable.close();
@@ -2508,6 +2526,7 @@ function _lsSetBtn(state,detail){
   var status=document.getElementById("liveSyncStatus");
   if(!btn||!txt)return;
   if(state==="active"){
+    var _lw2=document.getElementById("lsExportWrap");if(_lw2)_lw2.style.display="flex";
     btn.style.background="linear-gradient(135deg,var(--g7),var(--g6))";
     btn.style.borderRadius="6px 0 0 6px";
     btn.style.opacity="1";
@@ -2715,7 +2734,9 @@ async function toggleLiveSync(){
 
 (async function(){
   if(!window.showOpenFilePicker)return;
+  await new Promise(function(r){setTimeout(r,0);});
   var handle=await _lsLoad();if(!handle)return;
+  var _lw=document.getElementById("lsExportWrap");if(_lw)_lw.style.display="flex";
   try{
     var perm=await handle.queryPermission({mode:"read"});
     if(perm==="granted"){await _lsRestore(handle);return;}
@@ -3030,6 +3051,25 @@ function _reanonymizeDB(){
 // after any such re-parse to lock it back down to just this one company's
 // group before anything ever gets rendered, or a "refresh" would hand one
 // client's browser the entire network's confidential data.
+// While the full network is briefly in DB (right after a Live Sync / upload
+// re-parse), refresh the locked file's network-wide pieces — true ACE averages
+// and the anonymous Scale Comparison peers — before it's scoped back down.
+function _refreshSoloNetworkSnapshot(){
+  var solo=window.ACE_SOLO_COMPANY;
+  if(!solo||!DB||!DB.groups||Object.keys(DB.groups).length<2)return;
+  try{
+    window.ACE_SOLO_COMPANY=null;
+    recomputeAce();
+    window.__ACE_ORIG_NETWORK_AVERAGES=JSON.parse(JSON.stringify(DB.ace_averages||{}));
+    if(window.ACE_SCALE_PEERS)window.ACE_SCALE_PEERS=_buildScalePeers(solo);
+  }catch(e){console.warn("Network snapshot refresh failed:",e);}
+  window.ACE_SOLO_COMPANY=solo;
+}
+function _updateExpQRange(){
+  var el=document.getElementById("expQRange");if(!el||!S||!S.group||!DB.groups[S.group])return;
+  var last=lastDataQIdx(S.group);if(last<0)return;
+  el.textContent=QQ[Math.max(0,last-8)]+"\u2013"+QQ[last];
+}
 function _relockSoloExport(){
   if(!window.ACE_SOLO_COMPANY)return;
   var soloCo=window.ACE_SOLO_COMPANY;
@@ -3407,8 +3447,20 @@ function applyWorkbook(wb,fname,done){
   // Run these LAST — after every parse step above (raw_financial, raw_gpa,
   // qotq, locations, historical backfill all populate full real network data)
   // so a locked export's re-scoping isn't immediately undone by a later step.
+  _refreshSoloNetworkSnapshot();
   _reanonymizeDB();
   _relockSoloExport();
+  // The sheet may spell the locked company differently than when it was
+  // exported (e.g. "Clear Choice" -> "Clear Choice Outdoor") — keep the report
+  // pointed at that company instead of falling back to the first peer.
+  if(window.ACE_SOLO_COMPANY&&DB.groups[S.group]){
+    var _soloRoster=DB.groups[S.group].companies||[];
+    if(_soloRoster.indexOf(S.company)===-1){
+      var _soloHit=_soloRoster.filter(function(c){return c===window.ACE_SOLO_COMPANY||_coNameMatches(c,window.ACE_SOLO_COMPANY);})[0];
+      if(_soloHit)S.company=_soloHit;
+    }
+  }
+  _updateExpQRange();
   done(grpCount,coCount);
 }
 // Financial Data sheet (3rd tab) and Progress Data sheet (5th tab) are raw Microsoft Forms
@@ -12940,12 +12992,25 @@ function exportCompany(){
     }
 
     // Lock the header: swap controls for company identity badge
+    var _lastQi=lastDataQIdx(S.group);
+    var _expQRangeTxt=_lastQi>=0?QQ[Math.max(0,_lastQi-8)]+"&ndash;"+QQ[_lastQi]:"";
     const badge='<div style="display:flex;align-items:center;flex:1">'
       +'<div style="display:flex;flex-direction:column;margin-left:8px">'
       +'<div style="font-size:17px;font-weight:800;color:#fff">'+S.company+'</div>'
-      +'<div style="font-size:10px;font-weight:600;color:rgba(255,255,255,.65)">ACE '+S.group+' &middot; Q1 2024&ndash;Q1 2026</div>'
+      +'<div style="font-size:10px;font-weight:600;color:rgba(255,255,255,.65)">ACE '+S.group+' &middot; <span id="expQRange">'+_expQRangeTxt+'</span></div>'
       +'</div></div>'
-      +'<div class="tr"><span class="chip" style="background:rgba(255,255,255,.12);color:#fff;border-color:rgba(255,255,255,.2)">[Locked] Company Report</span></div>';
+      +'<div class="tr">'
+      // Live Sync stays hidden for whoever receives the file; it only appears on a
+      // computer that already has the ACE Excel connected (i.e. ACE's own machine).
+      +'<div id="lsExportWrap" style="display:none;align-items:center;gap:6px">'
+      +'<div style="display:flex;align-items:center;gap:3px">'
+      +'<button class="upbtn" id="liveSyncBtn" onclick="toggleLiveSync()" title="Connect the ACE Excel file - this report auto-updates whenever it changes" style="border-radius:6px 0 0 6px;opacity:0.5;"><span id="liveSyncTxt">Live Sync</span></button>'
+      +'<button class="upbtn" id="liveSyncRefreshBtn" onclick="liveSyncNow()" title="Check for updates now" style="display:none;border-radius:0 6px 6px 0;border-left:1px solid rgba(255,255,255,.15);padding:5px 8px"><svg id="liveSyncRefreshIco" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" style="width:12px;height:12px"><path d="M23 4v6h-6"></path><path d="M1 20v-6h6"></path><path d="M3.51 9a9 9 0 0114.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0020.49 15"></path></svg></button>'
+      +'</div>'
+      +'<button class="upbtn" id="liveSyncConnectFileBtn" onclick="liveSyncConnectFile()" title="Pick THIS report file so each sync also saves the new numbers into it" style="display:none">Auto-save ▸</button>'
+      +'<span id="liveSyncStatus" style="display:none;font-size:10px;color:rgba(255,255,255,.6);white-space:nowrap"></span>'
+      +'</div>'
+      +'<span class="chip" style="background:rgba(255,255,255,.12);color:#fff;border-color:rgba(255,255,255,.2)">[Locked] Company Report</span></div>';
     const hdrRx=/<div class="tctl"><span class="tlbl">Group[\s\S]*?(?=\s*<\/div>\s*<!--\s*CO HEADER\s*-->)/;
     if(hdrRx.test(html))html=html.replace(hdrRx,badge);
 
