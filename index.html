@@ -2146,6 +2146,9 @@ function _authOn(){return !!ACE_AUTH&&!IS_EXPORTED;}
 // the website for everyone. Only their hashes are in the page; the website checks the same
 // hashes (api/data.js), so the passwords themselves aren't readable from the page.
 var _ACE_ADMIN_HASHES=["c5bbed28d6406d0efba843a1765910f781da12c52a53d021af0701dc44c7fa89","ce0b8f1c30cba7cc7550b611759f263d5554fb648a9660822d75e60ea55d737a","9ad8a9ed06a37d5315a5a589f9348c0afdad2836ac7515fb92918e03be3ff8d5"];
+// View-only passwords (exact capitalisation): see every group and company like an admin,
+// but can't change anything (the website doesn't accept their saves either).
+var _ACE_VIEWER_HASHES=["0d10d6dff671fb0cdb94cdf1b6deec74fe3b214da1712853b131470dd9235875"];
 function _adminHash(pw){return _sha256Hex("ace-admin|"+String(pw||"").replace(/^\s+|\s+$/g,""));}
 var _ACE_ADMIN_PW_KEY="acegate_admin";   // this tab's admin sign-in, for saving updates to the website
 window.ACE_ADMIN=false;   // true only after an admin password signs in — renaming/roster editing need it
@@ -2162,6 +2165,7 @@ function _authWho(pw,preferCo,grp){
   if(!ACE_AUTH)return null;
   pw=String(pw||"").replace(/^\s+|\s+$/g,"");if(!pw)return null;
   var ah=_adminHash(pw);if(_ACE_ADMIN_HASHES.indexOf(ah)!==-1)return {who:"ACE",h:ah,admin:true};
+  if(_ACE_VIEWER_HASHES.indexOf(ah)!==-1)return {who:"ACE",h:ah,viewer:true};
   var h=_authHash(pw);
   if((ACE_AUTH.master||[]).indexOf(h)!==-1)return {who:"ACE",h:h};
   var hits=(ACE_AUTH.companies||[]).filter(function(x){return x.h===h;});
@@ -2182,7 +2186,7 @@ function _authWho(pw,preferCo,grp){
 function _authRemembered(){
   try{
     var s=JSON.parse(sessionStorage.getItem(_AUTH_SESSION_KEY)||"null");if(!s||!s.h)return null;
-    if(s.who==="ACE")return ((ACE_AUTH.master||[]).indexOf(s.h)!==-1||_ACE_ADMIN_HASHES.indexOf(s.h)!==-1)?s:null;
+    if(s.who==="ACE")return ((ACE_AUTH.master||[]).indexOf(s.h)!==-1||_ACE_ADMIN_HASHES.indexOf(s.h)!==-1||_ACE_VIEWER_HASHES.indexOf(s.h)!==-1)?s:null;
     if((ACE_AUTH.companies||[]).some(function(x){return x.c===s.who&&x.h===s.h;}))return s;
     var w=_authWho(s.who);return w&&w.who===s.who&&w.h===s.h?s:null;   // signed in with the company name
   }catch(e){return null;}
@@ -17153,9 +17157,32 @@ function _aceLogout(){
   try{sessionStorage.setItem('ace_show_gate','1');}catch(e){}
   location.reload();
 }
+// ── View-only sign-in (facilitators) ────────────────────────────────────────
+// Sees everything; every control that changes data or settings is hidden or blocked.
+function _aceViewOnly(){
+  if(window._aceViewOnlyOn)return;window._aceViewOnlyOn=true;
+  document.body.classList.add("ace-viewonly");
+  var st=document.createElement("style");
+  st.textContent='.ace-viewonly #liveSyncBtn,.ace-viewonly #liveSyncRefreshBtn,.ace-viewonly #liveSyncConnectFileBtn,'
+    +'.ace-viewonly #ovAddToAllCard,.ace-viewonly #pdfUploadLbl,.ace-viewonly #pdfFileInput,.ace-viewonly #aiAddBtn,.ace-viewonly #trackAddWrap,'
+    +'.ace-viewonly #uploadModal,.ace-viewonly .pill-manage,.ace-viewonly [onclick^="openUpload"],.ace-viewonly [onclick^="removeSubLink"],'
+    +'.ace-viewonly [onclick^="removePdf"],.ace-viewonly [onclick^="removeUpload"],.ace-viewonly [onclick^="addSubLink"]{display:none!important;}';
+  document.head.appendChild(st);
+  function no(){try{_aceSharedToast("View-only sign-in — changes can only be made with an admin password.",true);}catch(e){}}
+  ["openUpload","handleFileSelect","processFile","toggleLiveSync","liveSyncNow","liveSyncConnectFile","liveSyncSaveNow",
+   "addSubLink","addSubLinkFromOverview","removeSubLink","handlePdfUpload","removePdf","removeUpload",
+   "toggleExclusion","clearMetricExclusions","toggleManualSub","saveManualSubs","_aiSave","setLogo",
+   "_saveContactsLS","_saveLocations","_saveSubLinks","openNameManager","openRosterManager","openDataRemover",
+   "_dnSaveToFile","_rosterSaveToFile","_lsWriteBack"].forEach(function(n){
+    if(typeof window[n]==="function")window[n]=function(){no();return n==="_lsWriteBack"?Promise.resolve(false):undefined;};
+  });
+}
 function _authEnter(who,grp){
   var gate=document.getElementById('loginGate');
-  window.ACE_ADMIN=(who==="ACE");
+  var _vw=false;try{var _ss=JSON.parse(sessionStorage.getItem(_AUTH_SESSION_KEY)||"null");_vw=!!(_ss&&_ACE_VIEWER_HASHES.indexOf(_ss.h)!==-1);}catch(e){}
+  window.ACE_VIEWER=(who==="ACE")&&_vw;
+  window.ACE_ADMIN=(who==="ACE")&&!_vw;
+  if(window.ACE_VIEWER)_aceViewOnly();
   if(who==="ACE"){if(gate)gate.style.display="none";if(grp&&DB.groups[grp])S.group=grp;init();_authLabelSignOut();return true;}
   var match=_findLoginCompany(who);
   if(!match&&grp&&DB.groups[grp]){
@@ -17202,7 +17229,7 @@ function _showPasswordGate(coParam){
     if(!res){err.textContent="Incorrect password. Please try again.";err.style.display="block";inp.select();return;}
     if(grp==="__ACE__")grp="";
     try{sessionStorage.setItem(_AUTH_SESSION_KEY,JSON.stringify({who:res.who,h:res.h,g:grp}));}catch(e){}
-    try{if(res.admin)sessionStorage.setItem(_ACE_ADMIN_PW_KEY,(inp.value||"").replace(/^\s+|\s+$/g,""));else sessionStorage.removeItem(_ACE_ADMIN_PW_KEY);}catch(e){}
+    try{if(res.admin&&!res.viewer)sessionStorage.setItem(_ACE_ADMIN_PW_KEY,(inp.value||"").replace(/^\s+|\s+$/g,""));else sessionStorage.removeItem(_ACE_ADMIN_PW_KEY);}catch(e){}
     if(!_authEnter(res.who,grp)){
       try{sessionStorage.removeItem(_AUTH_SESSION_KEY);}catch(e){}
       err.textContent=grp?"That password is for "+res.who+", which isn't in ACE "+grp+". Pick your group and try again.":"Select your ACE group, then sign in.";err.style.display="block";
@@ -17274,6 +17301,34 @@ function _qotqRepair(q){
   }catch(e){}
   return q;
 }
+// Admin settings that used to live only in the browser that made them. They're shared
+// with everyone through the website (and restored into each browser's storage on load).
+var _ACE_SHARED_LS=["ace_submission_links","ace_contact_emails","ace_locs","ace_metric_excl","ace_metric_excl_q",
+  "ace_manual_subs","ace_tab_prefs","ace_action_items","ace_present_hidden_metrics","ace_present_quarters_back","ace_re_deadline"];
+var _ACE_SHARED_LS_PREFIX=["ace_logo_"];
+function _aceIsSharedKey(k){return _ACE_SHARED_LS.indexOf(k)!==-1||_ACE_SHARED_LS_PREFIX.some(function(p){return k.indexOf(p)===0;});}
+function _aceCollectSettings(){
+  var out={};
+  try{for(var i=0;i<localStorage.length;i++){var k=localStorage.key(i);if(k&&_aceIsSharedKey(k))out[k]=localStorage.getItem(k);}}catch(e){}
+  try{out["ace_submission_links"]=JSON.stringify(SUBMISSION_LINKS||[]);}catch(e){}
+  try{out["ace_contact_emails"]=JSON.stringify(CONTACT_EMAILS||{});}catch(e){}
+  try{out["ace_locs"]=JSON.stringify(ACE_LOCATIONS||{});}catch(e){}
+  return out;
+}
+function _aceApplySettings(st){
+  if(!st||typeof st!=="object")return;
+  window._aceApplyingShared=true;
+  try{
+    // Replace this browser's copies of the shared settings with the website's.
+    var drop=[];for(var i=0;i<localStorage.length;i++){var k=localStorage.key(i);if(k&&_aceIsSharedKey(k)&&!(k in st))drop.push(k);}
+    drop.forEach(function(k){localStorage.removeItem(k);});
+    Object.keys(st).forEach(function(k){if(_aceIsSharedKey(k)&&st[k]!=null)localStorage.setItem(k,st[k]);});
+  }catch(e){}
+  try{if(st.ace_submission_links)SUBMISSION_LINKS=JSON.parse(st.ace_submission_links)||[];}catch(e){}
+  try{if(st.ace_contact_emails)CONTACT_EMAILS=JSON.parse(st.ace_contact_emails)||{};}catch(e){}
+  try{if(st.ace_locs)ACE_LOCATIONS=JSON.parse(st.ace_locs)||{};}catch(e){}
+  window._aceApplyingShared=false;
+}
 function _aceApplyShared(p){
   if(!p||!p.db||!p.db.groups)return false;
   if(p.db.qotq)p.db.qotq=_qotqRepair(p.db.qotq);
@@ -17286,6 +17341,8 @@ function _aceApplyShared(p){
   try{if(p.tsubImports&&typeof p.tsubImports==="object"){TSUB_IMPORT_DATES=p.tsubImports;localStorage.setItem("ace_tsub_imports",JSON.stringify(p.tsubImports));}}catch(e){}
   try{if(Array.isArray(p.links))SUBMISSION_LINKS=p.links;}catch(e){}
   try{if(p.contacts&&typeof p.contacts==="object")CONTACT_EMAILS=p.contacts;}catch(e){}
+  if(p.settings)_aceApplySettings(p.settings);
+  try{if(p.pdfs&&typeof p.pdfs==="object")SUBMITTED_PDFS=p.pdfs;}catch(e){}
   try{localStorage.removeItem("ace_db_snapshot");}catch(e){}
   return true;
 }
@@ -17345,7 +17402,10 @@ async function _acePushRun(){
         var db=_aceDbForSaving();   // before removals, so Restore always works
         db.display_names=_displayNames();
         var at=new Date().toISOString();db.built_at=at;
-        var payload={v:1,at:at,db:db,auth:ACE_AUTH,tsub:TSUB_COMPLETION,tsubImports:TSUB_IMPORT_DATES,links:SUBMISSION_LINKS,contacts:CONTACT_EMAILS};
+        var payload={v:1,at:at,db:db,auth:ACE_AUTH,tsub:TSUB_COMPLETION,tsubImports:TSUB_IMPORT_DATES,links:SUBMISSION_LINKS,contacts:CONTACT_EMAILS,settings:_aceCollectSettings()};
+        var pdfJson="";try{pdfJson=JSON.stringify(SUBMITTED_PDFS||{});}catch(e){}
+        if(pdfJson.length<2800000)payload.pdfs=SUBMITTED_PDFS;
+        else _aceSharedToast("Uploaded PDFs are too large to share on the website (over ~2 MB in total) — everything else was shared.",true);
         var body=await _aceGzip(JSON.stringify(payload));
         var r=await fetch(base+"/api/data",{method:"POST",headers:{"content-type":"application/octet-stream","x-ace-admin":key},body:body});
         var j={};try{j=await r.json();}catch(e){}
@@ -17413,6 +17473,24 @@ function _aceBoot(){
   _showLoginGate();
 }
 _aceSharedLoad(_aceBoot);   // newest shared data first, then sign-in
+// Admin changes to shared settings (links, contacts, logos, locations, exclusions, PDFs…)
+// go to the website for everyone. Several changes close together become one upload.
+(function(){
+  ["_saveSubLinks","_saveContactsLS","_saveLocations","setLogo","saveExclusions","saveManualSubs","saveTabPrefs","_aiSave",
+   "setHiddenPresMetrics","setPresQuartersBack","removePdf","renderPdfSubmit"].forEach(function(n){
+    var f=window[n];if(typeof f!=="function")return;
+    window[n]=function(){
+      var r=f.apply(this,arguments);
+      if(!window._aceApplyingShared&&window.ACE_ADMIN===true&&!window.ACE_SOLO_COMPANY&&typeof _acePushShared==="function"){
+        if(n!=="renderPdfSubmit"||window._acePdfDirty){window._acePdfDirty=false;_acePushShared();}
+      }
+      return r;
+    };
+  });
+  var up=window.handlePdfUpload;
+  if(typeof up==="function")window.handlePdfUpload=function(){window._acePdfDirty=true;return up.apply(this,arguments);};
+  document.addEventListener("change",function(e){if(e.target&&e.target.id==="re-deadline"&&window.ACE_ADMIN===true)_acePushShared();},true);
+})();
 </script>
 <div id="expToast"></div>
 <script>
