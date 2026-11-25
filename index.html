@@ -2141,11 +2141,11 @@ function _authHash(pw){return _sha256Hex(ACE_AUTH.salt+"|"+pw);}
 function _authOn(){return !!ACE_AUTH&&!IS_EXPORTED;}
 // Who does this password open? -> "ACE" | company name | null
 // Admin passwords always open everything (any capitalisation, stray spaces ignored).
-// Admin passwords (any capitalisation) open everything and can update
+// Admin passwords (exact capitalisation) open everything and can update
 // the website for everyone. Only their hashes are in the page; the website checks the same
 // hashes (api/data.js), so the passwords themselves aren't readable from the page.
-var _ACE_ADMIN_HASHES=["7ad26e0eca017fc82cdb462f384f3c5952a4cdef24f6b6d7f6217817c188c0c7","157ce237f9dd8d658cb5f2ff8754d0d93ed3b86354ce1d9d56070bca35438563","85bae39ee60efea570ba83e18a74f63d0456b2070186902e557a2469b319bef7"];
-function _adminHash(pw){return _sha256Hex("ace-admin|"+String(pw||"").replace(/^\s+|\s+$/g,"").toLowerCase());}
+var _ACE_ADMIN_HASHES=["c5bbed28d6406d0efba843a1765910f781da12c52a53d021af0701dc44c7fa89","ce0b8f1c30cba7cc7550b611759f263d5554fb648a9660822d75e60ea55d737a","9ad8a9ed06a37d5315a5a589f9348c0afdad2836ac7515fb92918e03be3ff8d5"];
+function _adminHash(pw){return _sha256Hex("ace-admin|"+String(pw||"").replace(/^\s+|\s+$/g,""));}
 var _ACE_ADMIN_PW_KEY="acegate_admin";   // this tab's admin sign-in, for saving updates to the website
 window.ACE_ADMIN=false;   // true only after an admin password signs in — renaming/roster editing need it
 function _fsLooseMatchAny(rosterName,sheetName){
@@ -2169,9 +2169,9 @@ function _authWho(pw,preferCo,grp){
   if(grp&&hits.length>1){var inG=hits.filter(function(x){return _inGroup(x.c,grp);});if(inG.length)hits=inG;}
   if(!hits.length){
     // For now: a company with no password in the Passwords tab signs in with its own
-    // name (exactly as it appears on the dashboard, any capitalisation).
+    // name, exactly as it appears on the dashboard (capitalisation must match).
     var nm=pw.toLowerCase(),byName=null;
-    Object.keys(DB.groups||{}).forEach(function(g){(DB.groups[g].companies||[]).forEach(function(c){if(!byName&&String(c).toLowerCase()===nm)byName=c;});});
+    Object.keys(DB.groups||{}).forEach(function(g){(DB.groups[g].companies||[]).forEach(function(c){if(!byName&&String(c)===pw)byName=c;});});
     if(byName&&!(ACE_AUTH.companies||[]).some(function(x){return String(x.c).toLowerCase()===nm;}))return {who:byName,h:_authHash(byName)};
     return null;
   }

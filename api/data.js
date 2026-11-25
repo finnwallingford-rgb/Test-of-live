@@ -1,31 +1,37 @@
 // ACE shared live data.
 //
-// GET  /api/data  -> { url, at } for the newest data an admin synced (or { url: null }).
+// GET  /api/data  -> { url, at } for the newest data an admin saved (or { url: null }).
 // POST /api/data  -> an admin's Live Sync / upload saves the gzipped dashboard data here.
 //                    Only admin sign-ins are accepted (header x-ace-admin = the admin
 //                    password that signed in; checked against the same hashes as the page).
 //
-// Every page that opens the site loads the newest copy, so a sync on one computer
+// Every page that opens the site loads the newest copy, so an upload on one computer
 // reaches everyone who signs in on any computer.
 //
-// Vercel setup (once): Storage -> create a Blob store -> connect it to this project
-// (that adds BLOB_READ_WRITE_TOKEN). Nothing else to set.
+// Vercel setup (once): Storage -> create a Blob store (Public) -> connect it to this
+// project (that adds BLOB_READ_WRITE_TOKEN). Nothing else to set.
+//
+// Talks to Vercel Blob with plain HTTPS requests (no npm packages to install or break).
 
 const crypto = require("crypto");
+
+const BLOB_API = "https://blob.vercel-storage.com";
+const BLOB_API_VERSION = "9";
 const PREFIX = "ace-shared/data-";
-// sha256("ace-admin|" + lower-case admin password) — the same list as in the dashboard page.
+const MAX_BYTES = 4400000; // Vercel request body limit is 4.5 MB (the gzipped data is far smaller)
+
+// sha256("ace-admin|" + admin password, exact capitalisation) — the same list as in the dashboard page.
 const ADMIN_HASHES = [
-  "7ad26e0eca017fc82cdb462f384f3c5952a4cdef24f6b6d7f6217817c188c0c7",
-  "157ce237f9dd8d658cb5f2ff8754d0d93ed3b86354ce1d9d56070bca35438563",
-  "85bae39ee60efea570ba83e18a74f63d0456b2070186902e557a2469b319bef7",
+  "c5bbed28d6406d0efba843a1765910f781da12c52a53d021af0701dc44c7fa89",
+  "ce0b8f1c30cba7cc7550b611759f263d5554fb648a9660822d75e60ea55d737a",
+  "9ad8a9ed06a37d5315a5a589f9348c0afdad2836ac7515fb92918e03be3ff8d5",
 ];
 function isAdmin(pw) {
-  pw = String(pw || "").trim().toLowerCase();
+  pw = String(pw || "").trim();
   if (!pw) return false;
   const h = crypto.createHash("sha256").update("ace-admin|" + pw, "utf8").digest("hex");
   return ADMIN_HASHES.includes(h);
 }
-const MAX_BYTES = 4400000; // Vercel request body limit is 4.5 MB (the gzipped data is far smaller)
 
 function cors(res) {
   res.setHeader("Access-Control-Allow-Origin", "*");
@@ -34,59 +40,106 @@ function cors(res) {
   res.setHeader("Cache-Control", "no-store");
 }
 
-async function newest(blob) {
-  let cursor, all = [];
-  do {
-    const page = await blob.list({ prefix: PREFIX, cursor, limit: 1000 });
-    all = all.concat(page.blobs);
-    cursor = page.hasMore ? page.cursor : undefined;
-  } while (cursor);
+function send(res, code, obj) {
+  res.statusCode = code;
+  res.setHeader("Content-Type", "application/json; charset=utf-8");
+  res.end(JSON.stringify(obj));
+}
+
+async function blobApi(path, init) {
+  const token = process.env.BLOB_READ_WRITE_TOKEN;
+  const r = await fetch(BLOB_API + path, {
+    ...init,
+    headers: {
+      authorization: "Bearer " + token,
+      "x-api-version": BLOB_API_VERSION,
+      ...(init && init.headers),
+    },
+    signal: AbortSignal.timeout(25000),
+  });
+  const text = await r.text();
+  let data = {};
+  try { data = text ? JSON.parse(text) : {}; } catch (e) { data = { raw: text.slice(0, 300) }; }
+  if (!r.ok) {
+    const msg = (data && data.error && (data.error.message || data.error.code)) || data.raw || ("status " + r.status);
+    throw new Error("storage said: " + msg);
+  }
+  return data;
+}
+
+async function listAll() {
+  let cursor = "", all = [];
+  for (let i = 0; i < 20; i++) {
+    const q = new URLSearchParams({ prefix: PREFIX, limit: "1000" });
+    if (cursor) q.set("cursor", cursor);
+    const page = await blobApi("?" + q.toString(), { method: "GET" });
+    all = all.concat(page.blobs || []);
+    if (!page.hasMore || !page.cursor) break;
+    cursor = page.cursor;
+  }
   all.sort((a, b) => new Date(b.uploadedAt) - new Date(a.uploadedAt));
   return all;
 }
 
-module.exports = async function handler(req, res) {
+async function readBody(req) {
+  if (Buffer.isBuffer(req.body)) return req.body;          // already read by the platform
+  const chunks = [];
+  let size = 0;
+  for await (const c of req) {
+    size += c.length;
+    if (size > MAX_BYTES) throw Object.assign(new Error("data too large"), { code: 413 });
+    chunks.push(Buffer.from(c));
+  }
+  return Buffer.concat(chunks);
+}
+
+async function handler(req, res) {
   cors(res);
-  if (req.method === "OPTIONS") return res.status(204).end();
-  const blob = await import("@vercel/blob");
+  if (req.method === "OPTIONS") { res.statusCode = 204; return res.end(); }
+
+  const noStore = "storage not set up: in Vercel, Storage -> Blob -> connect it to this project, then Redeploy";
+  if (!process.env.BLOB_READ_WRITE_TOKEN) {
+    return send(res, req.method === "GET" ? 200 : 500, { url: null, error: noStore });
+  }
 
   if (req.method === "GET") {
-    try {
-      const all = await newest(blob);
-      if (!all.length) return res.status(200).json({ url: null });
-      return res.status(200).json({ url: all[0].url, at: new Date(all[0].uploadedAt).toISOString() });
-    } catch (e) {
-      return res.status(200).json({ url: null, error: "storage not set up" });
-    }
+    const all = await listAll();
+    if (!all.length) return send(res, 200, { url: null });
+    return send(res, 200, { url: all[0].url, at: new Date(all[0].uploadedAt).toISOString() });
   }
 
   if (req.method === "POST") {
-    if (!isAdmin(req.headers["x-ace-admin"])) return res.status(401).json({ error: "admin sign-in required" });
-    const chunks = [];
-    let size = 0;
-    for await (const c of req) {
-      size += c.length;
-      if (size > MAX_BYTES) return res.status(413).json({ error: "data too large" });
-      chunks.push(c);
-    }
-    const body = Buffer.concat(chunks);
-    if (body.length < 20 || body[0] !== 0x1f || body[1] !== 0x8b) return res.status(400).json({ error: "expected gzipped data" });
+    if (!isAdmin(req.headers["x-ace-admin"])) return send(res, 401, { error: "admin sign-in required" });
+    let body;
+    try { body = await readBody(req); } catch (e) { return send(res, e.code || 400, { error: e.message }); }
+    if (body.length > MAX_BYTES) return send(res, 413, { error: "data too large" });
+    if (body.length < 20 || body[0] !== 0x1f || body[1] !== 0x8b) return send(res, 400, { error: "expected gzipped data" });
+    const at = new Date().toISOString();
+    const pathname = PREFIX + at.replace(/[:.]/g, "-") + ".json.gz";
+    const put = await blobApi("/?" + new URLSearchParams({ pathname }).toString(), {
+      method: "PUT",
+      body,
+      headers: { "x-content-type": "application/octet-stream", "x-add-random-suffix": "1" },
+    });
+    // Keep the five newest copies (older ones are only a safety net).
     try {
-      const at = new Date().toISOString();
-      const r = await blob.put(PREFIX + at.replace(/[:.]/g, "-") + ".json.gz", body, {
-        access: "public", addRandomSuffix: true, contentType: "application/octet-stream",
-      });
-      // Keep the five newest copies (older ones are only a safety net).
-      try {
-        const all = await newest(blob);
-        const old = all.slice(5).map((b) => b.url);
-        if (old.length) await blob.del(old);
-      } catch (e) {}
-      return res.status(200).json({ ok: true, url: r.url, at });
-    } catch (e) {
-      return res.status(500).json({ error: "could not store the data: " + (e && e.message || e) });
-    }
+      const old = (await listAll()).slice(5).map((b) => b.url);
+      if (old.length) {
+        await blobApi("/delete", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ urls: old }) });
+      }
+    } catch (e) {}
+    return send(res, 200, { ok: true, url: put.url, at });
   }
 
-  return res.status(405).json({ error: "method not allowed" });
+  return send(res, 405, { error: "method not allowed" });
+}
+
+// Never crash without saying why (Vercel only shows FUNCTION_INVOCATION_FAILED).
+module.exports = async function (req, res) {
+  try {
+    await handler(req, res);
+  } catch (e) {
+    try { cors(res); } catch (x) {}
+    if (!res.headersSent) send(res, 500, { url: null, error: String((e && e.message) || e) });
+  }
 };
