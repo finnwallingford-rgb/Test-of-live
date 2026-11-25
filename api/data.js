@@ -9,14 +9,16 @@
 // reaches everyone who signs in on any computer.
 //
 // Vercel setup (once): Storage -> create a Blob store (Public) -> connect it to this
-// project (that adds BLOB_READ_WRITE_TOKEN). Nothing else to set.
+// project. Nothing else to set.
 //
-// Talks to Vercel Blob with plain HTTPS requests (no npm packages to install or break).
+// Talks to Vercel Blob with plain HTTPS requests (no npm packages to install or break),
+// the same way Vercel's own @vercel/blob does. Two kinds of store connection exist:
+//   - newer: BLOB_STORE_ID + a short-lived OIDC sign-in Vercel attaches to each request
+//            (header x-vercel-oidc-token) -> https://vercel.com/api/blob, API version 13
+//   - older: BLOB_READ_WRITE_TOKEN -> https://blob.vercel-storage.com, API version 9
 
 const crypto = require("crypto");
 
-const BLOB_API = "https://blob.vercel-storage.com";
-const BLOB_API_VERSION = "9";
 const PREFIX = "ace-shared/data-";
 const MAX_BYTES = 4400000; // Vercel request body limit is 4.5 MB (the gzipped data is far smaller)
 
@@ -46,25 +48,35 @@ function send(res, code, obj) {
   res.end(JSON.stringify(obj));
 }
 
-// The storage connection Vercel adds when a Blob store is connected. It's usually called
-// BLOB_READ_WRITE_TOKEN, but Vercel lets the name have another prefix (e.g.
-// ACE_READ_WRITE_TOKEN), so accept any variable holding a Blob read-write token.
-function blobToken() {
-  if (process.env.BLOB_READ_WRITE_TOKEN) return process.env.BLOB_READ_WRITE_TOKEN;
-  for (const [k, v] of Object.entries(process.env)) {
-    if (typeof v === "string" && v.startsWith("vercel_blob_rw_")) return v;
-    if (/READ_WRITE_TOKEN$/.test(k) && v) return v;
+// How this deployment signs in to its Blob store (see the top of the file).
+function blobAuth(req) {
+  let rw = process.env.BLOB_READ_WRITE_TOKEN || "";
+  if (!rw) {
+    for (const [k, v] of Object.entries(process.env)) {
+      if (typeof v === "string" && (v.startsWith("vercel_blob_rw_") || (/READ_WRITE_TOKEN$/.test(k) && v))) { rw = v; break; }
+    }
   }
-  return "";
+  const storeId = String(process.env.BLOB_STORE_ID || "").trim().replace(/^store_/, "");
+  const oidc = String((req && req.headers && req.headers["x-vercel-oidc-token"]) || process.env.VERCEL_OIDC_TOKEN || "").trim();
+  if (storeId && oidc) {
+    return { base: "https://vercel.com/api/blob", version: "13", headers: { authorization: "Bearer " + oidc, "x-vercel-blob-store-id": storeId } };
+  }
+  if (rw) {
+    return { base: "https://blob.vercel-storage.com", version: "9", headers: { authorization: "Bearer " + rw } };
+  }
+  if (storeId && !oidc) {
+    return { error: "the Blob store is connected (BLOB_STORE_ID found) but Vercel didn't attach its sign-in (OIDC) to this request: in Vercel open the project -> Settings -> Security -> Secure Backend Access with OIDC Federation -> Enabled, Save, then Redeploy" };
+  }
+  return null;
 }
 
-async function blobApi(path, init) {
-  const token = blobToken();
-  const r = await fetch(BLOB_API + path, {
+async function blobApi(auth, path, init) {
+  const r = await fetch(auth.base + path, {
     ...init,
     headers: {
-      authorization: "Bearer " + token,
-      "x-api-version": BLOB_API_VERSION,
+      ...auth.headers,
+      "x-api-version": auth.version,
+      "x-api-blob-request-id": Date.now() + ":" + Math.random().toString(16).slice(2),
       ...(init && init.headers),
     },
     signal: AbortSignal.timeout(25000),
@@ -74,17 +86,17 @@ async function blobApi(path, init) {
   try { data = text ? JSON.parse(text) : {}; } catch (e) { data = { raw: text.slice(0, 300) }; }
   if (!r.ok) {
     const msg = (data && data.error && (data.error.message || data.error.code)) || data.raw || ("status " + r.status);
-    throw new Error("storage said: " + msg);
+    throw new Error("storage said: " + msg + " (" + r.status + ")");
   }
   return data;
 }
 
-async function listAll() {
+async function listAll(auth) {
   let cursor = "", all = [];
   for (let i = 0; i < 20; i++) {
     const q = new URLSearchParams({ prefix: PREFIX, limit: "1000" });
     if (cursor) q.set("cursor", cursor);
-    const page = await blobApi("?" + q.toString(), { method: "GET" });
+    const page = await blobApi(auth, "?" + q.toString(), { method: "GET" });
     all = all.concat(page.blobs || []);
     if (!page.hasMore || !page.cursor) break;
     cursor = page.cursor;
@@ -109,15 +121,16 @@ async function handler(req, res) {
   cors(res);
   if (req.method === "OPTIONS") { res.statusCode = 204; return res.end(); }
 
-  if (!blobToken()) {
-    const seen = Object.keys(process.env).filter((k) => /BLOB|STORAGE|READ_WRITE/i.test(k));
-    const noStore = "storage not connected to this deployment: in Vercel open Storage -> your Blob store -> Projects -> connect it to this project (Production ticked), then Deployments -> newest -> Redeploy"
-      + (seen.length ? " (storage-related settings found: " + seen.join(", ") + ")" : " (no storage settings found at all)");
+  const auth = blobAuth(req);
+  if (!auth || auth.error) {
+    const seen = Object.keys(process.env).filter((k) => /BLOB|STORAGE|READ_WRITE|OIDC/i.test(k));
+    const noStore = (auth && auth.error) || ("storage not connected to this deployment: in Vercel open Storage -> your Blob store -> Projects -> connect it to this project (Production ticked), then Deployments -> newest -> Redeploy"
+      + (seen.length ? " (storage-related settings found: " + seen.join(", ") + ")" : " (no storage settings found at all)"));
     return send(res, req.method === "GET" ? 200 : 500, { url: null, error: noStore });
   }
 
   if (req.method === "GET") {
-    const all = await listAll();
+    const all = await listAll(auth);
     if (!all.length) return send(res, 200, { url: null });
     return send(res, 200, { url: all[0].url, at: new Date(all[0].uploadedAt).toISOString() });
   }
@@ -130,16 +143,16 @@ async function handler(req, res) {
     if (body.length < 20 || body[0] !== 0x1f || body[1] !== 0x8b) return send(res, 400, { error: "expected gzipped data" });
     const at = new Date().toISOString();
     const pathname = PREFIX + at.replace(/[:.]/g, "-") + ".json.gz";
-    const put = await blobApi("/?" + new URLSearchParams({ pathname }).toString(), {
+    const put = await blobApi(auth, "/?" + new URLSearchParams({ pathname }).toString(), {
       method: "PUT",
       body,
-      headers: { "x-content-type": "application/octet-stream", "x-add-random-suffix": "1" },
+      headers: { "x-vercel-blob-access": "public", "x-content-type": "application/octet-stream", "x-add-random-suffix": "1" },
     });
     // Keep the five newest copies (older ones are only a safety net).
     try {
-      const old = (await listAll()).slice(5).map((b) => b.url);
+      const old = (await listAll(auth)).slice(5).map((b) => b.url);
       if (old.length) {
-        await blobApi("/delete", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ urls: old }) });
+        await blobApi(auth, "/delete", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ urls: old }) });
       }
     } catch (e) {}
     return send(res, 200, { ok: true, url: put.url, at });
