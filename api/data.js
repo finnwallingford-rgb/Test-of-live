@@ -46,8 +46,20 @@ function send(res, code, obj) {
   res.end(JSON.stringify(obj));
 }
 
+// The storage connection Vercel adds when a Blob store is connected. It's usually called
+// BLOB_READ_WRITE_TOKEN, but Vercel lets the name have another prefix (e.g.
+// ACE_READ_WRITE_TOKEN), so accept any variable holding a Blob read-write token.
+function blobToken() {
+  if (process.env.BLOB_READ_WRITE_TOKEN) return process.env.BLOB_READ_WRITE_TOKEN;
+  for (const [k, v] of Object.entries(process.env)) {
+    if (typeof v === "string" && v.startsWith("vercel_blob_rw_")) return v;
+    if (/READ_WRITE_TOKEN$/.test(k) && v) return v;
+  }
+  return "";
+}
+
 async function blobApi(path, init) {
-  const token = process.env.BLOB_READ_WRITE_TOKEN;
+  const token = blobToken();
   const r = await fetch(BLOB_API + path, {
     ...init,
     headers: {
@@ -97,8 +109,10 @@ async function handler(req, res) {
   cors(res);
   if (req.method === "OPTIONS") { res.statusCode = 204; return res.end(); }
 
-  const noStore = "storage not set up: in Vercel, Storage -> Blob -> connect it to this project, then Redeploy";
-  if (!process.env.BLOB_READ_WRITE_TOKEN) {
+  if (!blobToken()) {
+    const seen = Object.keys(process.env).filter((k) => /BLOB|STORAGE|READ_WRITE/i.test(k));
+    const noStore = "storage not connected to this deployment: in Vercel open Storage -> your Blob store -> Projects -> connect it to this project (Production ticked), then Deployments -> newest -> Redeploy"
+      + (seen.length ? " (storage-related settings found: " + seen.join(", ") + ")" : " (no storage settings found at all)");
     return send(res, req.method === "GET" ? 200 : 500, { url: null, error: noStore });
   }
 
