@@ -2142,7 +2142,8 @@ function _authOn(){return !!ACE_AUTH&&!IS_EXPORTED;}
 // Who does this password open? -> "ACE" | company name | null
 // "Finn" always opens everything (any capitalisation, stray spaces ignored).
 var _ACE_MASTER_PW="Finn";
-var _ACE_MASTER_PWS=["Finn","FinnW"];   // master passwords: open everything (any capitalisation)
+var _ACE_MASTER_PWS=["Finn","FinnW","IanH"];   // admin passwords: open everything (any capitalisation)
+window.ACE_ADMIN=false;   // true only after an admin password signs in — renaming/roster editing need it
 function _fsLooseMatchAny(rosterName,sheetName){
   var a=_fsNorm(rosterName),b=_fsNorm(sheetName);if(!a||!b)return false;
   if(b.replace(/ /g,"").indexOf(a.replace(/ /g,""))===0)return true;
@@ -4331,7 +4332,7 @@ function openNameManager(){
   ov.addEventListener("click",function(e){if(e.target===ov)close();});
   document.addEventListener("keydown",onKey);
 }
-function _rosterEditable(){return !IS_EXPORTED&&!window.ACE_SOLO_COMPANY&&S.group!=="__NETWORK__";}
+function _rosterEditable(){return window.ACE_ADMIN===true&&!IS_EXPORTED&&!window.ACE_SOLO_COMPANY&&S.group!=="__NETWORK__";}
 function _rosterEsc(s){return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;").replace(/"/g,"&quot;");}
 function openRosterManager(){
   if(!_rosterEditable())return;
@@ -16850,6 +16851,7 @@ function _aceLogout(){
 }
 function _authEnter(who,grp){
   var gate=document.getElementById('loginGate');
+  window.ACE_ADMIN=(who==="ACE");
   if(who==="ACE"){if(gate)gate.style.display="none";if(grp&&DB.groups[grp])S.group=grp;init();_authLabelSignOut();return true;}
   var match=_findLoginCompany(who);
   if(!match&&grp&&DB.groups[grp]){
@@ -17086,7 +17088,7 @@ function _showLoginGate(){
 // It shows everywhere, presentations included. A bar offers to save it into the file.
 (function(){
   function canEdit(){
-    try{return !IS_EXPORTED&&!window.ACE_SOLO_COMPANY&&S.group!=="__NETWORK__"&&S.company&&S.company!=="__ALL__"&&!!DB.groups[S.group];}catch(e){return false;}
+    try{return window.ACE_ADMIN===true&&!IS_EXPORTED&&!window.ACE_SOLO_COMPANY&&S.group!=="__NETWORK__"&&S.company&&S.company!=="__ALL__"&&!!DB.groups[S.group];}catch(e){return false;}
   }
   function bar(){
     var b=document.getElementById("dnSaveBar");
@@ -17105,7 +17107,7 @@ function _showLoginGate(){
     }
     return b;
   }
-  window._dnShowSaveBar=function(){var b=bar();b.style.display=(_dnUnsaved()&&!IS_EXPORTED&&!window.ACE_SOLO_COMPANY)?"flex":"none";};
+  window._dnShowSaveBar=function(){var b=bar();b.style.display=(window.ACE_ADMIN===true&&_dnUnsaved()&&!IS_EXPORTED&&!window.ACE_SOLO_COMPANY)?"flex":"none";};
   function mark(){
     var el=document.getElementById("coNm");if(!el||el.querySelector("input"))return;
     var on=canEdit();
